@@ -52,24 +52,28 @@ const liveModel = genAI.getGenerativeModel({
 Return ONLY a JSON object:
 {
   "type": "LinkedList" | "BinaryTree" | "Array" | "Stack",
-  "nodes": [{ "id": "string", "val": "string", "isError": false, "errorMessage": "", "suggestedFix": "", "fixStartLine": 0, "fixEndLine": 0 }],
-  "edges": [{ "from": "string", "to": "string", "isError": false, "errorMessage": "", "isDangling": false }],
+  "nodes": [{ "id": "string", "val": "string", "accessCount": 0, "isError": false, "errorMessage": "", "suggestedFix": "", "fixStartLine": 0, "fixEndLine": 0 }],
+  "edges": [{ "from": "string", "to": "string", "isActivePath": false, "isError": false, "errorMessage": "", "isDangling": false }],
   "highlightId": "string or null",
   "traceInfo": "string",
   "pointers": [{ "id": "string", "label": "string", "targetNodeId": "string" }],
   "discardedNodeIds": ["string"],
-  "stepLabel": "string"
+  "stepLabel": "string",
+  "complexity": "string"
 }
 
 Rules:
 - Stable node ids (n0, n1, ...). val = display value.
+- accessCount: how many times this node/element is read, compared, or modified during the algorithm execution up to the current line. 0 if untouched.
+- complexity: estimated Big-O time complexity based on loops and recursion (e.g. "O(n)", "O(log n)", "O(n²)"). Empty string if not determinable.
+- isActivePath on edges: true if this edge is being actively traversed at the current line (e.g. curr = curr->left, or curr = curr->next). Marks the path the algorithm is currently following.
 - pointers: every active variable with its target node id.
 - discardedNodeIds: nodes pruned from active search space. Empty array if none.
 - stepLabel: short pruning description. Empty if none.
 - highlightId: node in focus. null if none.
 - traceInfo: variable state string. Empty if nothing meaningful.
 - If inside a loop, show FIRST iteration state.
-- If code is incomplete: { "type": "Empty", "nodes": [], "edges": [], "highlightId": null, "traceInfo": "", "pointers": [], "discardedNodeIds": [], "stepLabel": "" }
+- If code is incomplete: { "type": "Empty", "nodes": [], "edges": [], "highlightId": null, "traceInfo": "", "pointers": [], "discardedNodeIds": [], "stepLabel": "", "complexity": "" }
 ${LOGIC_GUARD_RULES}
 - ONLY return the JSON. No text.`,
 });
@@ -84,13 +88,14 @@ Return ONLY a JSON object:
   "frames": [
     {
       "type": "LinkedList" | "BinaryTree" | "Array" | "Stack",
-      "nodes": [{ "id": "string", "val": "string", "isError": false, "errorMessage": "", "suggestedFix": "", "fixStartLine": 0, "fixEndLine": 0 }],
-      "edges": [{ "from": "string", "to": "string", "isError": false, "errorMessage": "", "isDangling": false }],
+      "nodes": [{ "id": "string", "val": "string", "accessCount": 0, "isError": false, "errorMessage": "", "suggestedFix": "", "fixStartLine": 0, "fixEndLine": 0 }],
+      "edges": [{ "from": "string", "to": "string", "isActivePath": false, "isError": false, "errorMessage": "", "isDangling": false }],
       "highlightId": "string or null",
       "traceInfo": "string",
       "pointers": [{ "id": "string", "label": "string", "targetNodeId": "string" }],
       "discardedNodeIds": ["string"],
-      "stepLabel": "string"
+      "stepLabel": "string",
+      "complexity": "string"
     }
   ]
 }
@@ -98,6 +103,9 @@ Return ONLY a JSON object:
 Rules:
 - SAME stable node ids across ALL frames.
 - Frame 0: initial state. Each subsequent frame: one logical step.
+- accessCount: cumulative reads/comparisons/modifications for each node up to this frame. Increases across frames as the algorithm progresses.
+- complexity: estimated Big-O (e.g. "O(log n)", "O(n)"). Same across all frames.
+- isActivePath on edges: true for the edge being traversed in this frame's step. Only one edge should be active per frame.
 - pointers, discardedNodeIds, stepLabel, highlightId, traceInfo as before.
 - Keep frames concise (3-10 frames).
 - If no algorithm: { "frames": [] }
@@ -108,11 +116,11 @@ ${LOGIC_GUARD_RULES}
 // ─── Types ──────────────────────────────────────────────────
 interface PointerInfo { id: string; label: string; targetNodeId: string; }
 interface NodeInfo {
-  id: string; val: string;
+  id: string; val: string; accessCount?: number;
   isError?: boolean; errorMessage?: string;
   suggestedFix?: string; fixStartLine?: number; fixEndLine?: number;
 }
-interface EdgeInfo { from: string; to: string; isError?: boolean; errorMessage?: string; isDangling?: boolean; }
+interface EdgeInfo { from: string; to: string; isActivePath?: boolean; isError?: boolean; errorMessage?: string; isDangling?: boolean; }
 interface DSPayload {
   type: string;
   nodes: NodeInfo[];
@@ -122,6 +130,7 @@ interface DSPayload {
   pointers: PointerInfo[];
   discardedNodeIds: string[];
   stepLabel: string;
+  complexity: string;
 }
 interface PlaybackPayload { frames: DSPayload[]; }
 
@@ -131,7 +140,9 @@ function sanitizePayload(p: DSPayload): void {
   p.pointers = Array.isArray(p.pointers) ? p.pointers : [];
   p.discardedNodeIds = Array.isArray(p.discardedNodeIds) ? p.discardedNodeIds : [];
   p.stepLabel = p.stepLabel ?? '';
+  p.complexity = p.complexity ?? '';
   for (const n of p.nodes) {
+    n.accessCount = typeof n.accessCount === 'number' ? n.accessCount : 0;
     n.isError = n.isError ?? false;
     n.errorMessage = n.errorMessage ?? '';
     n.suggestedFix = n.suggestedFix ?? '';
@@ -139,6 +150,7 @@ function sanitizePayload(p: DSPayload): void {
     n.fixEndLine = typeof n.fixEndLine === 'number' ? n.fixEndLine : 0;
   }
   for (const e of p.edges) {
+    e.isActivePath = e.isActivePath ?? false;
     e.isError = e.isError ?? false;
     e.errorMessage = e.errorMessage ?? '';
     e.isDangling = e.isDangling ?? false;
@@ -342,6 +354,8 @@ export function activate(context: vscode.ExtensionContext) {
       (msg: { command: string; data?: { fix: string; startLine: number; endLine: number } }) => {
         if (msg.command === 'applyFix' && msg.data) {
           applyFixToEditor(msg.data.fix, msg.data.startLine, msg.data.endLine);
+        } else if (msg.command === 'clearHeat') {
+          postToPanel('clearHeat');
         }
       },
       undefined,

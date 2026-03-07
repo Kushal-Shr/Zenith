@@ -225,9 +225,20 @@ class GhostNode {
     this.suggestedFix = '';
     this.fixStartLine = 0;
     this.fixEndLine = 0;
+    this.accessCount = 0;
+    this.heatLerp = 0;
+    this.pingAlpha = 0;
+    this.pingRadius = 0;
+    this.wasPinged = false;
   }
 
   moveTo(tx, ty) { this.targetX = tx; this.targetY = ty; }
+
+  triggerPing() {
+    this.pingAlpha = 255;
+    this.pingRadius = this.radius;
+    this.wasPinged = true;
+  }
 
   update() {
     let tx = this.targetX, ty = this.targetY;
@@ -241,6 +252,12 @@ class GhostNode {
     this.highlightLerp = lerp(this.highlightLerp, this.highlighted ? 1 : 0, 0.25);
     this.discardLerp = lerp(this.discardLerp, this.discarded ? 1 : 0, 0.25);
     this.errorLerp = lerp(this.errorLerp, this.isError ? 1 : 0, this.isError ? 0.2 : 0.35);
+    const heatTarget = constrain(this.accessCount / maxAccessCount, 0, 1);
+    this.heatLerp = lerp(this.heatLerp, heatTarget, 0.15);
+    if (this.pingAlpha > 0) {
+      this.pingRadius += 2.5;
+      this.pingAlpha = max(0, this.pingAlpha - 6);
+    }
   }
 
   draw() {
@@ -248,6 +265,7 @@ class GhostNode {
     const hl = this.highlightLerp;
     const dc = this.discardLerp;
     const er = this.errorLerp;
+    const ht = this.heatLerp;
 
     let r, g, b, nodeAlpha;
 
@@ -256,6 +274,15 @@ class GhostNode {
       r = lerp(lerp(0, 255, hl), errPulse, er);
       g = lerp(lerp(glow, 215, hl), 30, er);
       b = lerp(lerp(glow, 0, hl), 30, er);
+      nodeAlpha = 255;
+    } else if (ht > 0.02 && dc < 0.5) {
+      const coolR = 0, coolG = 180, coolB = 216;
+      const hotR = 255, hotG = 77, hotB = 0;
+      r = lerp(coolR, hotR, ht);
+      g = lerp(coolG, hotG, ht);
+      b = lerp(coolB, hotB, ht);
+      r = lerp(r, 255, hl * 0.4);
+      g = lerp(g, 215, hl * 0.3);
       nodeAlpha = 255;
     } else {
       const baseR = lerp(0, 255, hl);
@@ -275,6 +302,10 @@ class GhostNode {
       stroke(255, 40, 40, 50 * er);
       strokeWeight(errGlow * er);
       ellipse(this.x, this.y, this.radius * 2 + 20);
+    } else if (ht > 0.05 && dc < 0.5) {
+      const heatGlow = ht * 18 + 4;
+      drawingContext.shadowBlur = heatGlow;
+      drawingContext.shadowColor = 'rgba(' + floor(r) + ',' + floor(g) + ',' + floor(b) + ',0.6)';
     } else if (hl > 0.05 && dc < 0.5) {
       const ps = map(sin(this.glowPulse * 1.5), -1, 1, 12, 20);
       noFill();
@@ -287,6 +318,8 @@ class GhostNode {
     stroke(r, g, b, nodeAlpha);
     strokeWeight(2);
     ellipse(this.x, this.y, this.radius * 2);
+
+    drawingContext.shadowBlur = 0;
 
     stroke(r, g, b, 40 * (1 - dc));
     strokeWeight(6);
@@ -304,6 +337,17 @@ class GhostNode {
     textSize(14);
     textFont('Consolas');
     text(this.val, this.x, this.y);
+
+    if (this.pingAlpha > 1) {
+      noFill();
+      stroke(255, 215, 0, this.pingAlpha);
+      strokeWeight(2);
+      ellipse(this.x, this.y, this.pingRadius * 2);
+      stroke(255, 215, 0, this.pingAlpha * 0.4);
+      strokeWeight(1);
+      ellipse(this.x, this.y, this.pingRadius * 2 + 12);
+    }
+
     pop();
   }
 
@@ -384,6 +428,9 @@ let discardedNodeIds = new Set();
 let stepLabel = '';
 let hasErrors = false;
 let guardPulse = 0;
+let maxAccessCount = 1;
+let complexity = '';
+let activePathPulse = 0;
 
 let playbackFrames = [];
 let playbackIndex = 0;
@@ -403,6 +450,8 @@ function draw() {
 
   drawModeIndicator();
   drawLogicGuard();
+  drawComplexityBadge();
+  drawClearHeatButton();
   if (loading) drawLoadingIndicator();
 
   drawEdges();
@@ -464,6 +513,13 @@ function drawFixButtons() {
 
 function mousePressed() {
   if (overlayEl.classList.contains('visible')) return;
+
+  const cb = CLEAR_HEAT_BTN;
+  if (mouseX >= cb.x && mouseX <= cb.x + cb.w && mouseY >= cb.y && mouseY <= cb.y + cb.h) {
+    for (const id in nodeMap) { nodeMap[id].accessCount = 0; nodeMap[id].heatLerp = 0; }
+    maxAccessCount = 1;
+    return;
+  }
 
   for (const id in nodeMap) {
     const node = nodeMap[id];
@@ -537,23 +593,107 @@ function drawLogicGuard() {
   pop();
 }
 
+// ─── Complexity Badge ────────────────────────────────────────
+function drawComplexityBadge() {
+  if (!complexity) return;
+  push();
+  textFont('Consolas'); textSize(12);
+  const tw = textWidth(complexity) + 20;
+  const bx = width - tw - 10, by = 70;
+  noStroke();
+  fill(15, 15, 30, 200);
+  rect(bx, by, tw, 24, 6);
+  stroke(0, 180, 216, 120); strokeWeight(1); noFill();
+  rect(bx, by, tw, 24, 6);
+  noStroke();
+  fill(0, 220, 255, 220);
+  textAlign(CENTER, CENTER);
+  text(complexity, bx + tw / 2, by + 12);
+  pop();
+}
+
+// ─── Clear Heat Button ──────────────────────────────────────
+const CLEAR_HEAT_BTN = { x: 0, y: 0, w: 72, h: 20 };
+
+function drawClearHeatButton() {
+  let anyHeat = false;
+  for (const id in nodeMap) { if (nodeMap[id].accessCount > 0) { anyHeat = true; break; } }
+  if (!anyHeat) return;
+
+  const bx = width - CLEAR_HEAT_BTN.w - 10;
+  const by = complexity ? 100 : 70;
+  CLEAR_HEAT_BTN.x = bx; CLEAR_HEAT_BTN.y = by;
+
+  const hovering = mouseX >= bx && mouseX <= bx + CLEAR_HEAT_BTN.w && mouseY >= by && mouseY <= by + CLEAR_HEAT_BTN.h;
+
+  push();
+  rectMode(CORNER); noStroke();
+  if (hovering) {
+    fill(0, 180, 216, 180);
+    rect(bx, by, CLEAR_HEAT_BTN.w, CLEAR_HEAT_BTN.h, 4);
+    fill(0);
+  } else {
+    fill(30, 30, 40, 200);
+    rect(bx, by, CLEAR_HEAT_BTN.w, CLEAR_HEAT_BTN.h, 4);
+    stroke(0, 180, 216, 100); strokeWeight(1); noFill();
+    rect(bx, by, CLEAR_HEAT_BTN.w, CLEAR_HEAT_BTN.h, 4);
+    noStroke();
+    fill(0, 200, 230, 180);
+  }
+  textSize(9); textAlign(CENTER, CENTER); textFont('Consolas');
+  text('CLEAR HEAT', bx + CLEAR_HEAT_BTN.w / 2, by + CLEAR_HEAT_BTN.h / 2);
+  pop();
+}
+
 // ─── Playback ───────────────────────────────────────────────
+const SETTLE_THRESHOLD = 2.0;
+const MIN_HOLD_MS = 800;
+let playbackSettleStart = 0;
+
+function nodesSettled() {
+  for (const id in nodeMap) {
+    const n = nodeMap[id];
+    if (abs(n.x - n.targetX) > SETTLE_THRESHOLD || abs(n.y - n.targetY) > SETTLE_THRESHOLD) return false;
+  }
+  return true;
+}
+
 function startPlayback(frames) {
   stopPlayback();
   playbackFrames = frames;
   playbackIndex = 0;
   playbackActive = true;
   applyPayload(playbackFrames[0]);
-  playbackTimer = setInterval(advancePlayback, PLAYBACK_INTERVAL);
+  triggerPingsForActivePath();
+  playbackSettleStart = 0;
+  playbackTimer = setInterval(checkPlaybackAdvance, 100);
 }
-function advancePlayback() {
-  playbackIndex++;
-  if (playbackIndex >= playbackFrames.length) playbackIndex = 0;
-  applyPayload(playbackFrames[playbackIndex]);
+function checkPlaybackAdvance() {
+  if (!playbackActive || playbackFrames.length === 0) return;
+  if (nodesSettled()) {
+    if (playbackSettleStart === 0) { playbackSettleStart = Date.now(); return; }
+    if (Date.now() - playbackSettleStart >= MIN_HOLD_MS) {
+      playbackIndex++;
+      if (playbackIndex >= playbackFrames.length) playbackIndex = 0;
+      applyPayload(playbackFrames[playbackIndex]);
+      triggerPingsForActivePath();
+      playbackSettleStart = 0;
+    }
+  } else {
+    playbackSettleStart = 0;
+  }
 }
 function stopPlayback() {
   if (playbackTimer) { clearInterval(playbackTimer); playbackTimer = null; }
   playbackActive = false; playbackFrames = []; playbackIndex = 0;
+}
+
+function triggerPingsForActivePath() {
+  for (const e of edges) {
+    if (e.isActivePath && nodeMap[e.to]) {
+      nodeMap[e.to].triggerPing();
+    }
+  }
 }
 
 function drawPlaybackProgress() {
@@ -637,6 +777,8 @@ function drawLoadingIndicator() {
 
 // ─── Edge Drawing ───────────────────────────────────────────
 function drawEdges() {
+  activePathPulse += 0.05;
+
   for (const e of edges) {
     if (e.isDangling) {
       drawDanglingEdge(e);
@@ -656,20 +798,38 @@ function drawEdges() {
     const ex = b.x - cos(angle) * b.radius;
     const ey = b.y - sin(angle) * b.radius;
 
-    if (e.isError) {
+    if (e.isActivePath) {
+      const pa = map(sin(activePathPulse * 2), -1, 1, 180, 255);
+      const pw = map(sin(activePathPulse * 2), -1, 1, 3, 5);
+      push();
+      drawingContext.shadowBlur = 12;
+      drawingContext.shadowColor = 'rgba(255,215,0,0.5)';
+      stroke(255, 215, 0, pa); strokeWeight(pw);
+      line(sx, sy, ex, ey);
+      drawingContext.shadowBlur = 0;
+      pop();
+      drawArrowHead(ex, ey, angle, true, false, false);
+    } else if (e.isError) {
       stroke(255, 50, 50, 200); strokeWeight(2);
+      line(sx, sy, ex, ey);
+      drawArrowHead(ex, ey, angle, false, false, true);
     } else if (bothDC) {
       stroke(80, 80, 80, 60); strokeWeight(1);
+      line(sx, sy, ex, ey);
+      drawArrowHead(ex, ey, angle, false, true, false);
     } else if (isHL) {
       stroke(255, 215, 0, 200); strokeWeight(2);
+      line(sx, sy, ex, ey);
+      drawArrowHead(ex, ey, angle, true, false, false);
     } else if (anyDC) {
       stroke(0, 150, 150, 80); strokeWeight(1.2);
+      line(sx, sy, ex, ey);
+      drawArrowHead(ex, ey, angle, false, false, false);
     } else {
       stroke(0, 200, 200, 160); strokeWeight(1.5);
+      line(sx, sy, ex, ey);
+      drawArrowHead(ex, ey, angle, false, false, false);
     }
-
-    line(sx, sy, ex, ey);
-    drawArrowHead(ex, ey, angle, isHL, bothDC, e.isError);
   }
 }
 
@@ -739,6 +899,7 @@ function applyPayload(payload) {
   highlightId = payload.highlightId || null;
   traceInfo = payload.traceInfo || '';
   stepLabel = payload.stepLabel || '';
+  complexity = payload.complexity || '';
   discardedNodeIds = new Set(payload.discardedNodeIds || []);
   traceActive = true;
 
@@ -758,6 +919,13 @@ function applyPayload(payload) {
   else if (type === 'Array') layoutArray(nodes);
   else if (type === 'Stack') layoutStack(nodes);
 
+  let mx = 1;
+  for (const n of nodes) {
+    const ac = typeof n.accessCount === 'number' ? n.accessCount : 0;
+    if (ac > mx) mx = ac;
+  }
+  maxAccessCount = mx;
+
   for (const id in nodeMap) {
     nodeMap[id].highlighted = (id === highlightId);
     nodeMap[id].discarded = discardedNodeIds.has(id);
@@ -765,6 +933,7 @@ function applyPayload(payload) {
 
   for (const n of nodes) {
     if (nodeMap[n.id]) {
+      nodeMap[n.id].accessCount = typeof n.accessCount === 'number' ? n.accessCount : 0;
       nodeMap[n.id].isError = n.isError || false;
       nodeMap[n.id].errorMessage = n.errorMessage || '';
       nodeMap[n.id].suggestedFix = n.suggestedFix || '';
@@ -776,7 +945,12 @@ function applyPayload(payload) {
 
   for (const e of edges) {
     if (e.isError || e.isDangling) hasErrors = true;
+    if (e.isActivePath && nodeMap[e.to] && !nodeMap[e.to].wasPinged) {
+      nodeMap[e.to].triggerPing();
+    }
   }
+
+  for (const id in nodeMap) { nodeMap[id].wasPinged = false; }
 
   applyPointers(pp || []);
 }
@@ -855,6 +1029,9 @@ window.addEventListener('message', (event) => {
     startPlayback(msg.data);
   } else if (msg.command === 'stopPlayback') {
     stopPlayback();
+  } else if (msg.command === 'clearHeat') {
+    for (const id in nodeMap) { nodeMap[id].accessCount = 0; nodeMap[id].heatLerp = 0; }
+    maxAccessCount = 1;
   } else if (msg.command === 'loading') {
     loading = msg.data;
     if (!loading) loadingPulse = 0;
