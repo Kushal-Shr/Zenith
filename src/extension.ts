@@ -18,23 +18,32 @@ let lastAnalyzedLine = -1;
 let lastPlaybackText = '';
 let lastActiveEditor: vscode.TextEditor | undefined;
 
-const LOGIC_GUARD_RULES = `
-LOGIC-GUARD ERROR DETECTION & QUICK-FIX:
-In addition to data structure state, analyze the code for logical errors:
-- Memory leaks: nodes allocated with 'new' that have no pointer referencing them (orphaned).
-- Dangling pointers: pointer variables that reference freed/deleted memory or uninitialized memory.
-- Unintended cycles: circular references in linked lists or trees that should be acyclic.
-- Out-of-bounds access: array index access beyond the allocated size.
-- Use-after-free: accessing a node after it has been deleted.
-- Null dereference: dereferencing a pointer that is null at this line.
+const MENTOR_RULES = `
+ERROR DETECTION & BEST PRACTICE MENTOR:
+In addition to data structure state, analyze the code for two categories:
 
-For nodes: set "isError": true and "errorMessage": "description" on any node involved in an error.
-  If isError is true, ALSO provide:
-    "suggestedFix": the exact corrected C++ code that replaces the erroneous lines (e.g. "delete temp;\\ntemp = nullptr;").
-    "fixStartLine": the 1-based line number where the erroneous code STARTS.
-    "fixEndLine": the 1-based line number where the erroneous code ENDS (inclusive). The fix will REPLACE lines fixStartLine through fixEndLine.
-  If isError is false: "errorMessage": "", "suggestedFix": "", "fixStartLine": 0, "fixEndLine": 0.
-For edges: set "isError": true and "errorMessage": "description" on erroneous edges. Set "isDangling": true if the edge points to freed/non-existent memory. Otherwise "isError": false, "errorMessage": "", "isDangling": false.`;
+CATEGORY 1 — HARD ERRORS (will cause runtime crash or compile error):
+These set "isError": true, "isSuggestion": false.
+- Null dereference: dereferencing a pointer that is null → "Error: Null pointer dereference — this will crash at runtime."
+- Out-of-bounds access: array index beyond allocated size → "Error: Index out of bounds — undefined behavior at runtime."
+- Use-after-free: accessing memory after delete → "Error: Use-after-free — accessing released memory."
+- Dangling pointer dereference: reading/writing through a freed pointer → "Error: Dangling pointer access — undefined behavior."
+
+CATEGORY 2 — BEST PRACTICE SUGGESTIONS (won't crash but should be improved):
+These set "isError": false, "isSuggestion": true.
+- Memory leak: allocated with new but never deleted → "Resource Management: Consider deallocating this node to optimize memory usage."
+- Missing nullptr check (defensive): no null guard before access → "Defensive Coding: Adding a null check here would improve program stability."
+- Unintended cycle: circular reference in an acyclic structure → "Structure Integrity: A circular reference was detected — verify this is intentional."
+- Dangling pointer (not dereferenced): pointer to freed memory that isn't accessed → "Pointer Safety: This pointer currently references an inactive memory address."
+
+For nodes:
+  If "isError": true (hard error): set "isSuggestion": false, "errorMessage" to the error description, and provide "suggestedFix", "fixStartLine", "fixEndLine".
+  If "isSuggestion": true (best practice): set "isError": false, "errorMessage" to the mentor suggestion, and provide "suggestedFix" prefixed with "// Optimized by Zenith Best Practice Mentor\\n", "fixStartLine", "fixEndLine".
+  If neither: "isError": false, "isSuggestion": false, "errorMessage": "", "suggestedFix": "", "fixStartLine": 0, "fixEndLine": 0.
+For edges:
+  Hard error edges: "isError": true, "isSuggestion": false. Suggestion edges: "isError": false, "isSuggestion": true.
+  Set "isDangling": true if the edge points to freed/non-existent memory.
+  If neither: "isError": false, "isSuggestion": false, "errorMessage": "", "isDangling": false.`;
 
 // ─── Gemini Setup ───────────────────────────────────────────
 const apiKey = process.env.GOOGLE_GEN_AI_KEY || '';
@@ -47,13 +56,13 @@ const genAI = new GoogleGenerativeAI(apiKey);
 const liveModel = genAI.getGenerativeModel({
   model: 'gemini-2.5-flash',
   generationConfig: { responseMimeType: 'application/json' },
-  systemInstruction: `You are a C++ execution engine with Logic-Guard. Analyze the provided C++ code at the indicated line number. Determine the logical state of all data structures AND detect logic errors.
+  systemInstruction: `You are a C++ execution engine with a Best Practice Mentor. Analyze the provided C++ code at the indicated line number. Determine the logical state of all data structures AND identify best-practice improvement opportunities.
 
 Return ONLY a JSON object:
 {
   "type": "LinkedList" | "BinaryTree" | "Array" | "Stack",
-  "nodes": [{ "id": "string", "val": "string", "accessCount": 0, "isError": false, "errorMessage": "", "suggestedFix": "", "fixStartLine": 0, "fixEndLine": 0 }],
-  "edges": [{ "from": "string", "to": "string", "isActivePath": false, "isError": false, "errorMessage": "", "isDangling": false }],
+  "nodes": [{ "id": "string", "val": "string", "accessCount": 0, "isError": false, "isSuggestion": false, "errorMessage": "", "suggestedFix": "", "fixStartLine": 0, "fixEndLine": 0 }],
+  "edges": [{ "from": "string", "to": "string", "isActivePath": false, "isError": false, "isSuggestion": false, "errorMessage": "", "isDangling": false }],
   "highlightId": "string or null",
   "traceInfo": "string",
   "pointers": [{ "id": "string", "label": "string", "targetNodeId": "string" }],
@@ -74,22 +83,22 @@ Rules:
 - traceInfo: variable state string. Empty if nothing meaningful.
 - If inside a loop, show FIRST iteration state.
 - If code is incomplete: { "type": "Empty", "nodes": [], "edges": [], "highlightId": null, "traceInfo": "", "pointers": [], "discardedNodeIds": [], "stepLabel": "", "complexity": "" }
-${LOGIC_GUARD_RULES}
+${MENTOR_RULES}
 - ONLY return the JSON. No text.`,
 });
 
 const playbackModel = genAI.getGenerativeModel({
   model: 'gemini-2.5-flash',
   generationConfig: { responseMimeType: 'application/json' },
-  systemInstruction: `You are a C++ execution engine with Logic-Guard that produces a COMPLETE step-by-step trace. Given C++ code, identify the primary algorithm and data structure, then produce a frame for EVERY logical step. Also detect logic errors at each step.
+  systemInstruction: `You are a C++ execution engine with a Best Practice Mentor that produces a COMPLETE step-by-step trace. Given C++ code, identify the primary algorithm and data structure, then produce a frame for EVERY logical step. Also identify best-practice suggestions at each step.
 
 Return ONLY a JSON object:
 {
   "frames": [
     {
       "type": "LinkedList" | "BinaryTree" | "Array" | "Stack",
-      "nodes": [{ "id": "string", "val": "string", "accessCount": 0, "isError": false, "errorMessage": "", "suggestedFix": "", "fixStartLine": 0, "fixEndLine": 0 }],
-      "edges": [{ "from": "string", "to": "string", "isActivePath": false, "isError": false, "errorMessage": "", "isDangling": false }],
+      "nodes": [{ "id": "string", "val": "string", "accessCount": 0, "isError": false, "isSuggestion": false, "errorMessage": "", "suggestedFix": "", "fixStartLine": 0, "fixEndLine": 0 }],
+      "edges": [{ "from": "string", "to": "string", "isActivePath": false, "isError": false, "isSuggestion": false, "errorMessage": "", "isDangling": false }],
       "highlightId": "string or null",
       "traceInfo": "string",
       "pointers": [{ "id": "string", "label": "string", "targetNodeId": "string" }],
@@ -109,18 +118,72 @@ Rules:
 - pointers, discardedNodeIds, stepLabel, highlightId, traceInfo as before.
 - Keep frames concise (3-10 frames).
 - If no algorithm: { "frames": [] }
-${LOGIC_GUARD_RULES}
+${MENTOR_RULES}
 - ONLY return the JSON. No text.`,
 });
+
+const roadmapModel = genAI.getGenerativeModel({
+  model: 'gemini-2.5-flash',
+  generationConfig: { responseMimeType: 'application/json' },
+  systemInstruction: `You are a C++ learning roadmap advisor focused on conceptual understanding. Given the C++ code the user just completed, analyze which concept they practiced and suggest the next logical topic.
+
+Return ONLY a JSON object:
+{
+  "completedTopic": "string — what the user just practiced (e.g. 'Binary Search', 'Linked List Traversal')",
+  "nextTopic": "string — the next recommended DS/Algorithm to learn",
+  "reason": "string — one sentence why this is the logical next step",
+  "proTip": "string — 1-2 sentences explaining WHY this pseudocode is the logical next step based on the structure they just built. Reference their completed work. E.g. 'You built a BST — but insertion order can make it degenerate into a linked list. AVL rotations fix that by rebalancing after every insert.'",
+  "pseudocode": "string — high-level pseudocode describing the core algorithm logic for the next topic. Use plain English with structure (e.g. 'If balance_factor > 1 AND key < left.data, perform Right Rotation'). Do NOT write C++ syntax — describe the LOGIC only. 5-12 lines.",
+  "leetcode": [
+    { "title": "string — problem title", "url": "string — full leetcode URL" },
+    { "title": "string", "url": "string" },
+    { "title": "string", "url": "string" }
+  ],
+  "gfgUrl": "string — full GeeksforGeeks tutorial URL for the next topic",
+  "template": "string — a C++ boilerplate. Include: necessary #include headers, an empty struct Node or class definition with a TODO comment inside, an empty main() with a TODO. Do NOT implement any algorithm logic. The pseudocode will be inserted as a comment block at the top by the system."
+}
+
+Rules:
+- Provide exactly 3 LeetCode problems (Easy to Medium difficulty, directly related to the next topic).
+- Use real, valid LeetCode and GeeksforGeeks URLs.
+- The pseudocode MUST be conceptual — describe logic flow, conditions, and steps WITHOUT any C++ code.
+- The template MUST be a bare skeleton — no working algorithm code, just struct/class stubs and TODOs.
+- ONLY return the JSON. No text.`,
+});
+
+interface RoadmapPayload {
+  completedTopic: string;
+  nextTopic: string;
+  reason: string;
+  proTip: string;
+  pseudocode: string;
+  leetcode: { title: string; url: string }[];
+  gfgUrl: string;
+  template: string;
+}
+
+async function generateRoadmap(code: string): Promise<RoadmapPayload | null> {
+  if (!apiKey || apiKey === 'your_api_key_here') { return null; }
+  try {
+    const prompt = `The user just finished writing this C++ code. Suggest what to learn next:\n\n${code}`;
+    const result = await roadmapModel.generateContent(prompt);
+    const parsed: RoadmapPayload = JSON.parse(result.response.text());
+    if (!parsed.nextTopic || !Array.isArray(parsed.leetcode)) { return null; }
+    return parsed;
+  } catch (err: unknown) {
+    console.error('[Zenith] Roadmap error:', err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
 
 // ─── Types ──────────────────────────────────────────────────
 interface PointerInfo { id: string; label: string; targetNodeId: string; }
 interface NodeInfo {
   id: string; val: string; accessCount?: number;
-  isError?: boolean; errorMessage?: string;
+  isError?: boolean; isSuggestion?: boolean; errorMessage?: string;
   suggestedFix?: string; fixStartLine?: number; fixEndLine?: number;
 }
-interface EdgeInfo { from: string; to: string; isActivePath?: boolean; isError?: boolean; errorMessage?: string; isDangling?: boolean; }
+interface EdgeInfo { from: string; to: string; isActivePath?: boolean; isError?: boolean; isSuggestion?: boolean; errorMessage?: string; isDangling?: boolean; }
 interface DSPayload {
   type: string;
   nodes: NodeInfo[];
@@ -144,6 +207,7 @@ function sanitizePayload(p: DSPayload): void {
   for (const n of p.nodes) {
     n.accessCount = typeof n.accessCount === 'number' ? n.accessCount : 0;
     n.isError = n.isError ?? false;
+    n.isSuggestion = n.isSuggestion ?? false;
     n.errorMessage = n.errorMessage ?? '';
     n.suggestedFix = n.suggestedFix ?? '';
     n.fixStartLine = typeof n.fixStartLine === 'number' ? n.fixStartLine : 0;
@@ -152,6 +216,7 @@ function sanitizePayload(p: DSPayload): void {
   for (const e of p.edges) {
     e.isActivePath = e.isActivePath ?? false;
     e.isError = e.isError ?? false;
+    e.isSuggestion = e.isSuggestion ?? false;
     e.errorMessage = e.errorMessage ?? '';
     e.isDangling = e.isDangling ?? false;
   }
@@ -292,7 +357,7 @@ async function applyFixToEditor(fix: string, startLine: number, endLine: number)
   lastAnalyzedLine = -1;
   lastPlaybackText = '';
 
-  vscode.window.showInformationMessage(`Zenith: Fix applied — replaced lines ${startLine}-${endLine}`);
+  vscode.window.showInformationMessage(`Zenith Mentor: Recommendation applied — lines ${startLine}-${endLine} optimized.`);
 }
 
 // ─── Debounced Watchers ─────────────────────────────────────
@@ -351,11 +416,76 @@ export function activate(context: vscode.ExtensionContext) {
     panel.onDidDispose(() => { panel = undefined; }, null, context.subscriptions);
 
     panel.webview.onDidReceiveMessage(
-      (msg: { command: string; data?: { fix: string; startLine: number; endLine: number } }) => {
+      async (msg: { command: string; data?: unknown }) => {
         if (msg.command === 'applyFix' && msg.data) {
-          applyFixToEditor(msg.data.fix, msg.data.startLine, msg.data.endLine);
+          const fixData = msg.data as { fix: string; startLine: number; endLine: number };
+          applyFixToEditor(fixData.fix, fixData.startLine, fixData.endLine);
         } else if (msg.command === 'clearHeat') {
           postToPanel('clearHeat');
+        } else if (msg.command === 'finishSession') {
+          const answer = await vscode.window.showWarningMessage(
+            'Zenith: Are you sure you want to clear your code and finish this session?',
+            { modal: true },
+            'Yes, Finish'
+          );
+          if (answer !== 'Yes, Finish') { return; }
+
+          const editor = vscode.window.activeTextEditor ?? lastActiveEditor;
+          if (!editor || editor.document.isClosed) { return; }
+
+          const code = editor.document.getText();
+          await vscode.window.showTextDocument(editor.document, editor.viewColumn);
+
+          postToPanel('loading', true);
+          const roadmap = await generateRoadmap(code);
+          postToPanel('loading', false);
+
+          const fullRange = new vscode.Range(
+            new vscode.Position(0, 0),
+            new vscode.Position(editor.document.lineCount, 0)
+          );
+          await editor.edit(eb => { eb.replace(fullRange, ''); });
+
+          lastAnalyzedText = '';
+          lastAnalyzedLine = -1;
+          lastPlaybackText = '';
+
+          if (roadmap) {
+            postToPanel('roadmap', roadmap);
+          } else {
+            vscode.window.showWarningMessage('Zenith: Could not generate roadmap. Please try again.');
+          }
+        } else if (msg.command === 'startNextTopic') {
+          const payload = msg.data as { template: string; pseudocode: string; nextTopic: string };
+          const editor = vscode.window.activeTextEditor ?? lastActiveEditor;
+          if (!editor || editor.document.isClosed || !payload?.template) { return; }
+
+          let fileContent = '';
+          if (payload.pseudocode) {
+            const pseudoLines = payload.pseudocode.split('\n').map(l => ' * ' + l).join('\n');
+            fileContent += '/*\n * ═══════════════════════════════════════════════\n';
+            fileContent += ' *  ZENITH GUIDE: ' + (payload.nextTopic || 'Next Topic') + '\n';
+            fileContent += ' * ═══════════════════════════════════════════════\n';
+            fileContent += ' *\n' + pseudoLines + '\n *\n';
+            fileContent += ' * ═══════════════════════════════════════════════\n';
+            fileContent += ' *  Implement the logic above using C++.\n';
+            fileContent += ' *  Use the LeetCode / GFG links for reference.\n';
+            fileContent += ' * ═══════════════════════════════════════════════\n */\n\n';
+          }
+          fileContent += payload.template;
+
+          await vscode.window.showTextDocument(editor.document, editor.viewColumn);
+          const fullRange = new vscode.Range(
+            new vscode.Position(0, 0),
+            new vscode.Position(editor.document.lineCount, 0)
+          );
+          await editor.edit(eb => { eb.replace(fullRange, fileContent); });
+
+          lastAnalyzedText = '';
+          lastAnalyzedLine = -1;
+          lastPlaybackText = '';
+
+          postToPanel('hideRoadmap');
         }
       },
       undefined,
