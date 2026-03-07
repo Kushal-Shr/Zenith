@@ -16,9 +16,10 @@ let isAnalyzing = false;
 let lastAnalyzedText = '';
 let lastAnalyzedLine = -1;
 let lastPlaybackText = '';
+let lastActiveEditor: vscode.TextEditor | undefined;
 
 const LOGIC_GUARD_RULES = `
-LOGIC-GUARD ERROR DETECTION:
+LOGIC-GUARD ERROR DETECTION & QUICK-FIX:
 In addition to data structure state, analyze the code for logical errors:
 - Memory leaks: nodes allocated with 'new' that have no pointer referencing them (orphaned).
 - Dangling pointers: pointer variables that reference freed/deleted memory or uninitialized memory.
@@ -27,8 +28,13 @@ In addition to data structure state, analyze the code for logical errors:
 - Use-after-free: accessing a node after it has been deleted.
 - Null dereference: dereferencing a pointer that is null at this line.
 
-For nodes: set "isError": true and "errorMessage": "description" on any node involved in an error. Otherwise "isError": false, "errorMessage": "".
-For edges: set "isError": true and "errorMessage": "description" on erroneous edges (e.g. cycle-causing edge, dangling pointer edge). Set "isDangling": true if the edge points to freed/non-existent memory. Otherwise "isError": false, "errorMessage": "", "isDangling": false.`;
+For nodes: set "isError": true and "errorMessage": "description" on any node involved in an error.
+  If isError is true, ALSO provide:
+    "suggestedFix": the exact corrected C++ code that replaces the erroneous lines (e.g. "delete temp;\\ntemp = nullptr;").
+    "fixStartLine": the 1-based line number where the erroneous code STARTS.
+    "fixEndLine": the 1-based line number where the erroneous code ENDS (inclusive). The fix will REPLACE lines fixStartLine through fixEndLine.
+  If isError is false: "errorMessage": "", "suggestedFix": "", "fixStartLine": 0, "fixEndLine": 0.
+For edges: set "isError": true and "errorMessage": "description" on erroneous edges. Set "isDangling": true if the edge points to freed/non-existent memory. Otherwise "isError": false, "errorMessage": "", "isDangling": false.`;
 
 // ─── Gemini Setup ───────────────────────────────────────────
 const apiKey = process.env.GOOGLE_GEN_AI_KEY || '';
@@ -46,7 +52,7 @@ const liveModel = genAI.getGenerativeModel({
 Return ONLY a JSON object:
 {
   "type": "LinkedList" | "BinaryTree" | "Array" | "Stack",
-  "nodes": [{ "id": "string", "val": "string", "isError": false, "errorMessage": "" }],
+  "nodes": [{ "id": "string", "val": "string", "isError": false, "errorMessage": "", "suggestedFix": "", "fixStartLine": 0, "fixEndLine": 0 }],
   "edges": [{ "from": "string", "to": "string", "isError": false, "errorMessage": "", "isDangling": false }],
   "highlightId": "string or null",
   "traceInfo": "string",
@@ -78,7 +84,7 @@ Return ONLY a JSON object:
   "frames": [
     {
       "type": "LinkedList" | "BinaryTree" | "Array" | "Stack",
-      "nodes": [{ "id": "string", "val": "string", "isError": false, "errorMessage": "" }],
+      "nodes": [{ "id": "string", "val": "string", "isError": false, "errorMessage": "", "suggestedFix": "", "fixStartLine": 0, "fixEndLine": 0 }],
       "edges": [{ "from": "string", "to": "string", "isError": false, "errorMessage": "", "isDangling": false }],
       "highlightId": "string or null",
       "traceInfo": "string",
@@ -101,7 +107,11 @@ ${LOGIC_GUARD_RULES}
 
 // ─── Types ──────────────────────────────────────────────────
 interface PointerInfo { id: string; label: string; targetNodeId: string; }
-interface NodeInfo { id: string; val: string; isError?: boolean; errorMessage?: string; }
+interface NodeInfo {
+  id: string; val: string;
+  isError?: boolean; errorMessage?: string;
+  suggestedFix?: string; fixStartLine?: number; fixEndLine?: number;
+}
 interface EdgeInfo { from: string; to: string; isError?: boolean; errorMessage?: string; isDangling?: boolean; }
 interface DSPayload {
   type: string;
@@ -124,6 +134,9 @@ function sanitizePayload(p: DSPayload): void {
   for (const n of p.nodes) {
     n.isError = n.isError ?? false;
     n.errorMessage = n.errorMessage ?? '';
+    n.suggestedFix = n.suggestedFix ?? '';
+    n.fixStartLine = typeof n.fixStartLine === 'number' ? n.fixStartLine : 0;
+    n.fixEndLine = typeof n.fixEndLine === 'number' ? n.fixEndLine : 0;
   }
   for (const e of p.edges) {
     e.isError = e.isError ?? false;
@@ -198,13 +211,53 @@ async function sendFullPlayback(text: string) {
   }
 }
 
+// ─── Apply Fix to Editor ────────────────────────────────────
+async function applyFixToEditor(fix: string, startLine: number, endLine: number) {
+  const editor = vscode.window.activeTextEditor ?? lastActiveEditor;
+  if (!editor || editor.document.isClosed) {
+    vscode.window.showWarningMessage('Zenith: No active editor to apply fix.');
+    return;
+  }
+  await vscode.window.showTextDocument(editor.document, editor.viewColumn);
+
+  const lineCount = editor.document.lineCount;
+  const startIdx = Math.max(0, startLine - 1);
+  const endIdx = Math.min(endLine, lineCount);
+
+  const refLineIdx = Math.min(startIdx, lineCount - 1);
+  const indentMatch = editor.document.lineAt(refLineIdx).text.match(/^(\s*)/);
+  const indent = indentMatch ? indentMatch[1] : '    ';
+  const indentedFix = fix.split('\n').map(l => indent + l).join('\n') + '\n';
+
+  const rangeStart = new vscode.Position(startIdx, 0);
+  const rangeEnd = new vscode.Position(endIdx, 0);
+  const replaceRange = new vscode.Range(rangeStart, rangeEnd);
+
+  const success = await editor.edit(editBuilder => {
+    editBuilder.replace(replaceRange, indentedFix);
+  });
+
+  if (!success) {
+    vscode.window.showWarningMessage('Zenith: Failed to apply fix — editor may be read-only.');
+    return;
+  }
+
+  editor.revealRange(new vscode.Range(rangeStart, rangeStart), vscode.TextEditorRevealType.InCenter);
+
+  lastAnalyzedText = '';
+  lastAnalyzedLine = -1;
+  lastPlaybackText = '';
+
+  vscode.window.showInformationMessage(`Zenith: Fix applied — replaced lines ${startLine}-${endLine}`);
+}
+
 // ─── Debounced Watchers ─────────────────────────────────────
 function resetIdleTimer() {
   if (idleTimer) { clearTimeout(idleTimer); }
   idleTimer = setTimeout(() => {
     const editor = vscode.window.activeTextEditor;
     if (editor) { sendFullPlayback(editor.document.getText()); }
-  }, 2000);
+  }, 7000);
 }
 
 function onDocumentChange() {
@@ -249,6 +302,16 @@ export function activate(context: vscode.ExtensionContext) {
     panel.webview.html = getWebviewContent(p5Uri.toString(), nonce, panel.webview.cspSource);
     panel.onDidDispose(() => { panel = undefined; }, null, context.subscriptions);
 
+    panel.webview.onDidReceiveMessage(
+      (msg: { command: string; data?: { fix: string; startLine: number; endLine: number } }) => {
+        if (msg.command === 'applyFix' && msg.data) {
+          applyFixToEditor(msg.data.fix, msg.data.startLine, msg.data.endLine);
+        }
+      },
+      undefined,
+      context.subscriptions
+    );
+
     const editor = vscode.window.activeTextEditor;
     if (editor) {
       sendLiveTrace(editor.document.getText(), editor.selection.active.line + 1);
@@ -256,10 +319,17 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
+  if (vscode.window.activeTextEditor) {
+    lastActiveEditor = vscode.window.activeTextEditor;
+  }
+
   context.subscriptions.push(
     disposable,
     vscode.workspace.onDidChangeTextDocument(onDocumentChange),
     vscode.window.onDidChangeTextEditorSelection(onCursorMove),
+    vscode.window.onDidChangeActiveTextEditor(editor => {
+      if (editor) { lastActiveEditor = editor; }
+    }),
   );
 }
 

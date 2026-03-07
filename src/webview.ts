@@ -16,12 +16,181 @@ export function getWebviewContent(p5Uri: string, nonce: string, cspSource: strin
     color: white;
     font-family: 'Segoe UI', Consolas, monospace;
   }
-  canvas { display: block; }
+  canvas { display: block; position: absolute; top: 0; left: 0; z-index: 1; }
+
+  #ghost-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 100%;
+    z-index: 10;
+    background: rgba(0, 0, 0, 0.65);
+    justify-content: center;
+    align-items: center;
+  }
+  #ghost-overlay.visible { display: flex; }
+
+  .ghost-code-panel {
+    background: #1a1a2e;
+    border: 1px solid #ff4040;
+    border-radius: 10px;
+    padding: 0;
+    max-width: 460px;
+    width: 90%;
+    box-shadow: 0 0 30px rgba(255, 40, 40, 0.3), 0 0 60px rgba(255, 40, 40, 0.1);
+    overflow: hidden;
+    font-family: Consolas, monospace;
+  }
+  .ghost-code-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    background: linear-gradient(90deg, #2a0a0a, #1a1a2e);
+    border-bottom: 1px solid #ff4040aa;
+  }
+  .ghost-code-header span {
+    color: #ff6060;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+  }
+  .ghost-code-close {
+    background: none; border: none; color: #ff6060; font-size: 16px;
+    cursor: pointer; padding: 0 4px; line-height: 1;
+  }
+  .ghost-code-close:hover { color: #ff9090; }
+
+  .ghost-code-body {
+    padding: 14px;
+  }
+  .ghost-code-error {
+    color: #ff8080;
+    font-size: 11px;
+    margin-bottom: 10px;
+    padding: 6px 8px;
+    background: rgba(255, 40, 40, 0.1);
+    border-radius: 4px;
+    border-left: 3px solid #ff4040;
+  }
+  .ghost-code-block {
+    background: #0d0d1a;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 12px;
+    font-size: 12px;
+    color: #00ffc8;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+  .ghost-code-line {
+    color: #555;
+    font-size: 10px;
+    margin-top: 8px;
+  }
+
+  .ghost-code-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 10px 14px;
+    border-top: 1px solid #333;
+    background: #111;
+  }
+  .ghost-btn {
+    padding: 6px 16px;
+    border: none;
+    border-radius: 5px;
+    font-size: 11px;
+    font-family: Consolas, monospace;
+    cursor: pointer;
+    letter-spacing: 0.5px;
+    transition: all 0.15s;
+  }
+  .ghost-btn-cancel {
+    background: #2a2a2a;
+    color: #aaa;
+  }
+  .ghost-btn-cancel:hover { background: #3a3a3a; color: #fff; }
+  .ghost-btn-apply {
+    background: linear-gradient(135deg, #00c896, #00a67d);
+    color: #000;
+    font-weight: 700;
+  }
+  .ghost-btn-apply:hover {
+    background: linear-gradient(135deg, #00e6a8, #00c896);
+    box-shadow: 0 0 12px rgba(0, 200, 150, 0.4);
+  }
 </style>
 <script nonce="${nonce}" src="${p5Uri}"></script>
 </head>
 <body>
+
+<div id="ghost-overlay">
+  <div class="ghost-code-panel">
+    <div class="ghost-code-header">
+      <span>GHOST FIX</span>
+      <button class="ghost-code-close" id="overlay-close">&times;</button>
+    </div>
+    <div class="ghost-code-body">
+      <div class="ghost-code-error" id="overlay-error"></div>
+      <div class="ghost-code-block" id="overlay-code"></div>
+      <div class="ghost-code-line" id="overlay-line"></div>
+    </div>
+    <div class="ghost-code-footer">
+      <button class="ghost-btn ghost-btn-cancel" id="overlay-cancel">Dismiss</button>
+      <button class="ghost-btn ghost-btn-apply" id="overlay-apply">Apply Fix</button>
+    </div>
+  </div>
+</div>
+
 <script nonce="${nonce}">
+const vscodeApi = acquireVsCodeApi();
+
+// ─── Overlay Logic ──────────────────────────────────────────
+let overlayFix = '';
+let overlayStartLine = 0;
+let overlayEndLine = 0;
+
+const overlayEl = document.getElementById('ghost-overlay');
+const overlayErrorEl = document.getElementById('overlay-error');
+const overlayCodeEl = document.getElementById('overlay-code');
+const overlayLineEl = document.getElementById('overlay-line');
+
+function showOverlay(errorMsg, fix, startLine, endLine) {
+  overlayFix = fix;
+  overlayStartLine = startLine;
+  overlayEndLine = endLine;
+  overlayErrorEl.textContent = errorMsg;
+  overlayCodeEl.textContent = fix;
+  if (startLine > 0 && endLine > 0) {
+    overlayLineEl.textContent = startLine === endLine
+      ? 'Replaces line ' + startLine
+      : 'Replaces lines ' + startLine + '-' + endLine;
+  } else {
+    overlayLineEl.textContent = '';
+  }
+  overlayEl.classList.add('visible');
+}
+
+function hideOverlay() {
+  overlayEl.classList.remove('visible');
+  overlayFix = '';
+  overlayStartLine = 0;
+  overlayEndLine = 0;
+}
+
+document.getElementById('overlay-close').addEventListener('click', hideOverlay);
+document.getElementById('overlay-cancel').addEventListener('click', hideOverlay);
+document.getElementById('overlay-apply').addEventListener('click', () => {
+  if (overlayFix && overlayStartLine > 0 && overlayEndLine > 0) {
+    vscodeApi.postMessage({ command: 'applyFix', data: { fix: overlayFix, startLine: overlayStartLine, endLine: overlayEndLine } });
+  }
+  hideOverlay();
+});
+
 // ─── Pointer Color Palette ──────────────────────────────────
 const POINTER_COLORS = [
   [57,255,20],[255,16,240],[255,165,0],[0,191,255],
@@ -53,6 +222,9 @@ class GhostNode {
     this.isError = false;
     this.errorLerp = 0;
     this.errorMessage = '';
+    this.suggestedFix = '';
+    this.fixStartLine = 0;
+    this.fixEndLine = 0;
   }
 
   moveTo(tx, ty) { this.targetX = tx; this.targetY = ty; }
@@ -137,6 +309,13 @@ class GhostNode {
 
   isMouseOver() {
     return dist(mouseX, mouseY, this.x, this.y) < this.radius + 5;
+  }
+
+  getFixBtnBounds() {
+    const bw = 36, bh = 16;
+    const bx = this.x + this.radius + 6;
+    const by = this.y - bh / 2;
+    return { x: bx, y: by, w: bw, h: bh };
   }
 }
 
@@ -234,6 +413,7 @@ function draw() {
   }
 
   updateAndDrawPointers();
+  drawFixButtons();
   drawErrorTooltips();
 
   if (highlightId && nodeMap[highlightId] && traceInfo) {
@@ -245,6 +425,56 @@ function draw() {
 
   drawPointerLegend();
   drawWatermark();
+}
+
+// ─── Fix Buttons on Error Nodes ─────────────────────────────
+function drawFixButtons() {
+  for (const id in nodeMap) {
+    const node = nodeMap[id];
+    if (!node.isError || !node.suggestedFix) continue;
+
+    const b = node.getFixBtnBounds();
+    const hovering = mouseX >= b.x && mouseX <= b.x + b.w && mouseY >= b.y && mouseY <= b.y + b.h;
+    const pulse = map(sin(node.glowPulse * 2), -1, 1, 0.85, 1);
+
+    push();
+    rectMode(CORNER);
+    noStroke();
+
+    if (hovering) {
+      fill(0, 220, 150, 240);
+      rect(b.x, b.y, b.w, b.h, 4);
+      fill(0, 0, 0);
+    } else {
+      fill(40, 40, 40, 200 * pulse);
+      stroke(0, 200, 140, 160 * pulse);
+      strokeWeight(1);
+      rect(b.x, b.y, b.w, b.h, 4);
+      noStroke();
+      fill(0, 220, 150, 220 * pulse);
+    }
+
+    textSize(9);
+    textAlign(CENTER, CENTER);
+    textFont('Consolas');
+    text('FIX', b.x + b.w / 2, b.y + b.h / 2);
+    pop();
+  }
+}
+
+function mousePressed() {
+  if (overlayEl.classList.contains('visible')) return;
+
+  for (const id in nodeMap) {
+    const node = nodeMap[id];
+    if (!node.isError || !node.suggestedFix) continue;
+
+    const b = node.getFixBtnBounds();
+    if (mouseX >= b.x && mouseX <= b.x + b.w && mouseY >= b.y && mouseY <= b.y + b.h) {
+      showOverlay(node.errorMessage, node.suggestedFix, node.fixStartLine, node.fixEndLine);
+      return;
+    }
+  }
 }
 
 // ─── Error Hover Tooltips ───────────────────────────────────
@@ -537,6 +767,9 @@ function applyPayload(payload) {
     if (nodeMap[n.id]) {
       nodeMap[n.id].isError = n.isError || false;
       nodeMap[n.id].errorMessage = n.errorMessage || '';
+      nodeMap[n.id].suggestedFix = n.suggestedFix || '';
+      nodeMap[n.id].fixStartLine = n.fixStartLine || 0;
+      nodeMap[n.id].fixEndLine = n.fixEndLine || 0;
       if (n.isError) hasErrors = true;
     }
   }
