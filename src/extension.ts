@@ -182,9 +182,17 @@ function postToPanel(command: string, data?: unknown) {
   if (panel) { panel.webview.postMessage({ command, data }); }
 }
 
+let pendingTrace: { text: string; line: number } | null = null;
+
 async function sendLiveTrace(text: string, lineNumber: number) {
-  if (!panel || isAnalyzing) { return; }
+  if (!panel) { return; }
   if (text === lastAnalyzedText && lineNumber === lastAnalyzedLine) { return; }
+
+  if (isAnalyzing) {
+    pendingTrace = { text, line: lineNumber };
+    return;
+  }
+
   isAnalyzing = true;
   postToPanel('loading', true);
   const payload = await analyzeCode(text, lineNumber);
@@ -195,11 +203,29 @@ async function sendLiveTrace(text: string, lineNumber: number) {
     lastAnalyzedLine = lineNumber;
     postToPanel('updateStructure', payload);
   }
+
+  if (pendingTrace) {
+    const next = pendingTrace;
+    pendingTrace = null;
+    sendLiveTrace(next.text, next.line);
+  } else if (pendingPlaybackText) {
+    const next = pendingPlaybackText;
+    pendingPlaybackText = null;
+    sendFullPlayback(next);
+  }
 }
 
+let pendingPlaybackText: string | null = null;
+
 async function sendFullPlayback(text: string) {
-  if (!panel || isAnalyzing) { return; }
+  if (!panel) { return; }
   if (text === lastPlaybackText) { return; }
+
+  if (isAnalyzing) {
+    pendingPlaybackText = text;
+    return;
+  }
+
   isAnalyzing = true;
   postToPanel('loading', true);
   const frames = await analyzeFullPlayback(text);
@@ -208,6 +234,12 @@ async function sendFullPlayback(text: string) {
   if (frames && frames.length > 0) {
     lastPlaybackText = text;
     postToPanel('playback', frames);
+  }
+
+  if (pendingPlaybackText) {
+    const next = pendingPlaybackText;
+    pendingPlaybackText = null;
+    sendFullPlayback(next);
   }
 }
 
@@ -257,19 +289,22 @@ function resetIdleTimer() {
   idleTimer = setTimeout(() => {
     const editor = vscode.window.activeTextEditor;
     if (editor) { sendFullPlayback(editor.document.getText()); }
-  }, 7000);
+  }, 2000);
 }
 
 function onDocumentChange() {
   if (docDebounceTimer) { clearTimeout(docDebounceTimer); }
   postToPanel('stopPlayback');
   lastPlaybackText = '';
+  lastAnalyzedText = '';
+  lastAnalyzedLine = -1;
+  pendingPlaybackText = null;
   docDebounceTimer = setTimeout(() => {
     const editor = vscode.window.activeTextEditor;
     if (editor) {
       sendLiveTrace(editor.document.getText(), editor.selection.active.line + 1);
     }
-  }, 300);
+  }, 50);
   resetIdleTimer();
 }
 
@@ -280,7 +315,8 @@ function onCursorMove() {
     if (editor) {
       sendLiveTrace(editor.document.getText(), editor.selection.active.line + 1);
     }
-  }, 200);
+  }, 50);
+  resetIdleTimer();
 }
 
 // ─── Activation ─────────────────────────────────────────────

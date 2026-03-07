@@ -235,12 +235,12 @@ class GhostNode {
       tx += random(-2, 2);
       ty += random(-2, 2);
     }
-    this.x = lerp(this.x, tx, 0.15);
-    this.y = lerp(this.y, ty, 0.15);
+    this.x = lerp(this.x, tx, 0.25);
+    this.y = lerp(this.y, ty, 0.25);
     this.glowPulse += 0.03;
-    this.highlightLerp = lerp(this.highlightLerp, this.highlighted ? 1 : 0, 0.15);
-    this.discardLerp = lerp(this.discardLerp, this.discarded ? 1 : 0, 0.12);
-    this.errorLerp = lerp(this.errorLerp, this.isError ? 1 : 0, 0.12);
+    this.highlightLerp = lerp(this.highlightLerp, this.highlighted ? 1 : 0, 0.25);
+    this.discardLerp = lerp(this.discardLerp, this.discarded ? 1 : 0, 0.25);
+    this.errorLerp = lerp(this.errorLerp, this.isError ? 1 : 0, this.isError ? 0.2 : 0.35);
   }
 
   draw() {
@@ -339,8 +339,8 @@ class GhostPointer {
     const od = node.radius + 40;
     this.targetX = node.x + cos(oa) * od;
     this.targetY = node.y + sin(oa) * od;
-    this.x = lerp(this.x, this.targetX, 0.15);
-    this.y = lerp(this.y, this.targetY, 0.15);
+    this.x = lerp(this.x, this.targetX, 0.25);
+    this.y = lerp(this.y, this.targetY, 0.25);
   }
   draw(nodeMap) {
     const node = nodeMap[this.targetNodeId];
@@ -389,7 +389,7 @@ let playbackFrames = [];
 let playbackIndex = 0;
 let playbackTimer = null;
 let playbackActive = false;
-const PLAYBACK_INTERVAL = 1200;
+const PLAYBACK_INTERVAL = 3000;
 
 // ─── p5.js Lifecycle ────────────────────────────────────────
 function setup() {
