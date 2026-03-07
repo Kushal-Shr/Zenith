@@ -757,6 +757,17 @@ class GhostPointer {
   }
 }
 
+// ─── Layout Cache ───────────────────────────────────────────
+const layoutCache = {};
+function cacheLayout() {
+  for (const id in nodeMap) {
+    layoutCache[id] = { x: nodeMap[id].targetX, y: nodeMap[id].targetY };
+  }
+}
+function getCachedPos(id) {
+  return layoutCache[id] || null;
+}
+
 // ─── State ──────────────────────────────────────────────────
 let nodeMap = {};
 let pointerMap = {};
@@ -776,12 +787,39 @@ let guardPulse = 0;
 let maxAccessCount = 1;
 let complexity = '';
 let activePathPulse = 0;
+let scalarVariables = [];
 
 let playbackFrames = [];
 let playbackIndex = 0;
 let playbackTimer = null;
 let playbackActive = false;
 const PLAYBACK_INTERVAL = 3000;
+
+// ─── Node Repulsion ─────────────────────────────────────────
+const REPULSION_RADIUS = 70;
+const REPULSION_STRENGTH = 2.5;
+
+function applyRepulsion() {
+  const ids = Object.keys(nodeMap);
+  const len = ids.length;
+  if (len < 2) return;
+  for (let i = 0; i < len; i++) {
+    for (let j = i + 1; j < len; j++) {
+      const a = nodeMap[ids[i]], b = nodeMap[ids[j]];
+      const dx = a.targetX - b.targetX;
+      const dy = a.targetY - b.targetY;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d < REPULSION_RADIUS && d > 0.1) {
+        const force = (REPULSION_RADIUS - d) / REPULSION_RADIUS * REPULSION_STRENGTH;
+        const nx = dx / d, ny = dy / d;
+        a.targetX += nx * force;
+        a.targetY += ny * force;
+        b.targetX -= nx * force;
+        b.targetY -= ny * force;
+      }
+    }
+  }
+}
 
 // ─── p5.js Lifecycle ────────────────────────────────────────
 function setup() {
@@ -801,6 +839,7 @@ function draw() {
 
   drawEdges();
 
+  applyRepulsion();
   for (const id in nodeMap) {
     nodeMap[id].update();
     nodeMap[id].draw();
@@ -817,6 +856,7 @@ function draw() {
   if (stepLabel) drawStepLabel();
   if (playbackActive) drawPlaybackProgress();
 
+  drawVariablesTray();
   drawPointerLegend();
   drawFinishButton();
   drawWatermark();
@@ -1169,6 +1209,27 @@ function drawLoadingIndicator() {
   fill(0, 255, 255, a); ellipse(width - 30, 25, r * 2);
   fill(0, 255, 255, a * 0.6); textSize(10); textAlign(RIGHT, CENTER);
   text('analyzing...', width - 46, 25); pop();
+
+  if (Object.keys(nodeMap).length === 0) {
+    drawPredictiveGhost();
+  }
+}
+
+function drawPredictiveGhost() {
+  const ids = Object.keys(layoutCache);
+  if (ids.length === 0) return;
+  const ghostAlpha = map(sin(loadingPulse * 1.5), -1, 1, 15, 35);
+  push();
+  noFill();
+  strokeWeight(1);
+  for (const id of ids) {
+    const p = layoutCache[id];
+    stroke(0, 255, 255, ghostAlpha);
+    ellipse(p.x, p.y, 60);
+    stroke(0, 255, 255, ghostAlpha * 0.5);
+    ellipse(p.x, p.y, 68);
+  }
+  pop();
 }
 
 // ─── Edge Drawing ───────────────────────────────────────────
@@ -1307,6 +1368,48 @@ function drawWatermark() {
 }
 
 // ─── Pointer Legend ─────────────────────────────────────────
+// ─── Variables Tray (Scalar Variables not on canvas) ────────
+function drawVariablesTray() {
+  if (!scalarVariables || scalarVariables.length === 0) return;
+  const trayX = width - 10;
+  const startY = 90;
+  const lineH = 18;
+  const pad = 8;
+  const headerH = 20;
+  const trayH = headerH + scalarVariables.length * lineH + pad;
+  const trayW = 140;
+
+  push();
+  fill(10, 14, 20, 180);
+  stroke(0, 180, 216, 80);
+  strokeWeight(1);
+  rectMode(CORNER);
+  rect(trayX - trayW, startY, trayW, trayH, 6);
+
+  noStroke();
+  fill(0, 180, 216, 200);
+  textSize(9);
+  textAlign(LEFT, TOP);
+  textFont('Consolas');
+  text('VARIABLES', trayX - trayW + pad, startY + 5);
+
+  fill(100, 110, 120, 120);
+  rect(trayX - trayW + pad, startY + headerH - 2, trayW - pad * 2, 1);
+
+  for (let i = 0; i < scalarVariables.length; i++) {
+    const v = scalarVariables[i];
+    const y = startY + headerH + i * lineH + 2;
+    fill(180, 190, 200, 200);
+    textSize(10);
+    textAlign(LEFT, TOP);
+    text(v.name, trayX - trayW + pad, y);
+    fill(0, 255, 200, 220);
+    textAlign(RIGHT, TOP);
+    text(v.value, trayX - pad, y);
+  }
+  pop();
+}
+
 function drawPointerLegend() {
   const al = new Set();
   for (const id in pointerMap) al.add(pointerMap[id].label);
@@ -1324,26 +1427,35 @@ function drawPointerLegend() {
 
 // ─── Data Mapping ───────────────────────────────────────────
 function applyPayload(payload) {
-  const { type, nodes, edges: pe, pointers: pp } = payload;
+  const { type, edges: pe, pointers: pp } = payload;
+  let nodes = payload.nodes || [];
   currentType = type;
   highlightId = payload.highlightId || null;
   traceInfo = payload.traceInfo || '';
   stepLabel = payload.stepLabel || '';
   complexity = payload.complexity || '';
   discardedNodeIds = new Set(payload.discardedNodeIds || []);
+  scalarVariables = Array.isArray(payload.variables) ? payload.variables : [];
   traceActive = true;
 
   hasErrors = false;
   hasSuggestions = false;
 
-  if (type === 'Empty' || !nodes || nodes.length === 0) {
+  nodes = nodes.filter(n => {
+    if (!n.id || !n.val) return false;
+    const v = String(n.val).toLowerCase();
+    if (v === 'undefined' || v === 'null' || v === 'uninitialized' || v === '?') return false;
+    return true;
+  });
+
+  if (type === 'Empty' || nodes.length === 0) {
     nodeMap = {}; edges = []; pointerMap = {}; return;
   }
 
   const incomingIds = new Set(nodes.map(n => n.id));
   for (const id in nodeMap) { if (!incomingIds.has(id)) delete nodeMap[id]; }
 
-  edges = pe || [];
+  edges = (pe || []).filter(e => incomingIds.has(e.from) && (incomingIds.has(e.to) || e.isDangling));
 
   if (type === 'LinkedList') layoutLinkedList(nodes);
   else if (type === 'BinaryTree') layoutBinaryTree(nodes);
@@ -1386,13 +1498,15 @@ function applyPayload(payload) {
 
   for (const id in nodeMap) { nodeMap[id].wasPinged = false; }
 
+  cacheLayout();
   applyPointers(pp || []);
 }
 
 function applyPointers(pointers) {
-  const ids = new Set(pointers.map(p => p.id));
+  const valid = pointers.filter(p => p.targetNodeId && nodeMap[p.targetNodeId]);
+  const ids = new Set(valid.map(p => p.id));
   for (const id in pointerMap) { if (!ids.has(id)) delete pointerMap[id]; }
-  for (const p of pointers) {
+  for (const p of valid) {
     if (pointerMap[p.id]) {
       pointerMap[p.id].label = p.label;
       pointerMap[p.id].color = getPointerColor(p.label);
@@ -1406,13 +1520,23 @@ function applyPointers(pointers) {
   }
 }
 
+function createOrMoveNode(n, tx, ty) {
+  if (nodeMap[n.id]) {
+    nodeMap[n.id].val = n.val;
+    nodeMap[n.id].moveTo(tx, ty);
+  } else {
+    const cached = getCachedPos(n.id);
+    const startX = cached ? cached.x : tx;
+    const startY = cached ? cached.y : ty;
+    const node = new GhostNode(n.id, n.val, startX, startY);
+    node.moveTo(tx, ty);
+    nodeMap[n.id] = node;
+  }
+}
+
 function layoutLinkedList(nodes) {
   const sp = 120, sx = 80, cy = height / 2;
-  nodes.forEach((n, i) => {
-    const tx = sx + i * sp;
-    if (nodeMap[n.id]) { nodeMap[n.id].val = n.val; nodeMap[n.id].moveTo(tx, cy); }
-    else nodeMap[n.id] = new GhostNode(n.id, n.val, tx, cy);
-  });
+  nodes.forEach((n, i) => createOrMoveNode(n, sx + i * sp, cy));
 }
 function layoutBinaryTree(nodes) {
   if (!nodes.length) return;
@@ -1430,26 +1554,30 @@ function layoutBinaryTree(nodes) {
     if (ch[1]) assign(ch[1], x + sp, y + yg, sp * 0.55);
   }
   assign(root.id, bx, by, width * 0.22);
+  const unpositioned = [];
   nodes.forEach(n => {
-    const p = pos[n.id] || { x: width / 2, y: height / 2 };
-    if (nodeMap[n.id]) { nodeMap[n.id].val = n.val; nodeMap[n.id].moveTo(p.x, p.y); }
-    else nodeMap[n.id] = new GhostNode(n.id, n.val, p.x, p.y);
+    const p = pos[n.id];
+    if (p) { createOrMoveNode(n, p.x, p.y); }
+    else { unpositioned.push(n); }
   });
+  if (unpositioned.length > 0) {
+    layoutCircularFallback(unpositioned);
+  }
 }
 function layoutArray(nodes) {
   const sp = 70, tw = (nodes.length - 1) * sp, sx = (width - tw) / 2, cy = height / 2;
-  nodes.forEach((n, i) => {
-    const tx = sx + i * sp;
-    if (nodeMap[n.id]) { nodeMap[n.id].val = n.val; nodeMap[n.id].moveTo(tx, cy); }
-    else nodeMap[n.id] = new GhostNode(n.id, n.val, tx, cy);
-  });
+  nodes.forEach((n, i) => createOrMoveNode(n, sx + i * sp, cy));
 }
 function layoutStack(nodes) {
   const sp = 70, cx = width / 2, bot = height - 80;
+  nodes.forEach((n, i) => createOrMoveNode(n, cx, bot - i * sp));
+}
+function layoutCircularFallback(nodes) {
+  const cx = width / 2, cy = height / 2;
+  const r = Math.min(width, height) * 0.3;
   nodes.forEach((n, i) => {
-    const ty = bot - i * sp;
-    if (nodeMap[n.id]) { nodeMap[n.id].val = n.val; nodeMap[n.id].moveTo(cx, ty); }
-    else nodeMap[n.id] = new GhostNode(n.id, n.val, cx, ty);
+    const angle = (TWO_PI / nodes.length) * i - HALF_PI;
+    createOrMoveNode(n, cx + Math.cos(angle) * r, cy + Math.sin(angle) * r);
   });
 }
 

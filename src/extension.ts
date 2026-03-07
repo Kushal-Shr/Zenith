@@ -66,10 +66,17 @@ Return ONLY a JSON object:
   "highlightId": "string or null",
   "traceInfo": "string",
   "pointers": [{ "id": "string", "label": "string", "targetNodeId": "string" }],
+  "variables": [{ "name": "string", "value": "string" }],
   "discardedNodeIds": ["string"],
   "stepLabel": "string",
   "complexity": "string"
 }
+
+VARIABLE CATEGORIZATION:
+- STRUCTURE_NODE: elements of an array, linked list, tree, or stack. These go in the "nodes" array as circular nodes.
+- SCALAR_POINTER: iterators (i, j, low, high, mid), pointer variables (curr, temp, prev), and search targets (target, key, val). These NEVER go in "nodes". If they reference a specific node, put them in "pointers" with the targetNodeId. If they don't reference any node (e.g. "int target = 5" with no node match yet), put them in "variables" with name and current value.
+- NEVER create a node for a scalar variable like target, i, j, index, key, result, found, size, count, etc.
+- Only create nodes for actual data structure elements (array slots, list nodes, tree nodes).
 
 Rules:
 - Stable node ids (n0, n1, ...). val = display value.
@@ -102,12 +109,17 @@ Return ONLY a JSON object:
       "highlightId": "string or null",
       "traceInfo": "string",
       "pointers": [{ "id": "string", "label": "string", "targetNodeId": "string" }],
+      "variables": [{ "name": "string", "value": "string" }],
       "discardedNodeIds": ["string"],
       "stepLabel": "string",
       "complexity": "string"
     }
   ]
 }
+
+VARIABLE CATEGORIZATION:
+- STRUCTURE_NODE: elements of an array, linked list, tree, or stack. These go in "nodes".
+- SCALAR_POINTER: iterators, pointer variables, and search targets. NEVER create nodes for these. Use "pointers" if they reference a node, or "variables" if they don't.
 
 Rules:
 - SAME stable node ids across ALL frames.
@@ -178,6 +190,7 @@ async function generateRoadmap(code: string): Promise<RoadmapPayload | null> {
 
 // ─── Types ──────────────────────────────────────────────────
 interface PointerInfo { id: string; label: string; targetNodeId: string; }
+interface VariableInfo { name: string; value: string; }
 interface NodeInfo {
   id: string; val: string; accessCount?: number;
   isError?: boolean; isSuggestion?: boolean; errorMessage?: string;
@@ -191,6 +204,7 @@ interface DSPayload {
   highlightId: string | null;
   traceInfo: string;
   pointers: PointerInfo[];
+  variables: VariableInfo[];
   discardedNodeIds: string[];
   stepLabel: string;
   complexity: string;
@@ -201,6 +215,7 @@ function sanitizePayload(p: DSPayload): void {
   p.highlightId = p.highlightId ?? null;
   p.traceInfo = p.traceInfo ?? '';
   p.pointers = Array.isArray(p.pointers) ? p.pointers : [];
+  p.variables = Array.isArray(p.variables) ? p.variables : [];
   p.discardedNodeIds = Array.isArray(p.discardedNodeIds) ? p.discardedNodeIds : [];
   p.stepLabel = p.stepLabel ?? '';
   p.complexity = p.complexity ?? '';
@@ -222,11 +237,27 @@ function sanitizePayload(p: DSPayload): void {
   }
 }
 
+// ─── Delta Extraction ────────────────────────────────────────
+const DELTA_LINE_THRESHOLD = 100;
+const DELTA_CONTEXT_RADIUS = 50;
+
+function buildPrompt(text: string, lineNumber: number): string {
+  const lines = text.split('\n');
+  if (lines.length <= DELTA_LINE_THRESHOLD) {
+    return `Analyze this C++ code at line ${lineNumber}:\n\n${text}`;
+  }
+  const start = Math.max(0, lineNumber - 1 - DELTA_CONTEXT_RADIUS);
+  const end = Math.min(lines.length, lineNumber - 1 + DELTA_CONTEXT_RADIUS);
+  const contextLines = lines.slice(start, end);
+  const numberedContext = contextLines.map((l, i) => `${start + i + 1}: ${l}`).join('\n');
+  return `Analyze this C++ code at line ${lineNumber}. The file has ${lines.length} lines total. Only the relevant context window (lines ${start + 1}-${end}) is shown. Only update nodes/positions that changed — preserve stable layout for unchanged nodes.\n\n${numberedContext}`;
+}
+
 // ─── Live Analysis ──────────────────────────────────────────
 async function analyzeCode(text: string, lineNumber: number): Promise<DSPayload | null> {
   if (!apiKey || apiKey === 'your_api_key_here') { return null; }
   try {
-    const prompt = `Analyze this C++ code at line ${lineNumber}:\n\n${text}`;
+    const prompt = buildPrompt(text, lineNumber);
     const result = await liveModel.generateContent(prompt);
     const parsed: DSPayload = JSON.parse(result.response.text());
     if (!parsed.type || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) { return null; }
@@ -294,12 +325,28 @@ async function sendLiveTrace(text: string, lineNumber: number) {
 
 let pendingPlaybackText: string | null = null;
 
+const playbackCache = new Map<string, DSPayload[]>();
+const MAX_CACHE_SIZE = 5;
+
+function getPlaybackCacheKey(text: string): string {
+  const trimmed = text.replace(/\s+/g, ' ').trim();
+  return crypto.createHash('md5').update(trimmed).digest('hex');
+}
+
 async function sendFullPlayback(text: string) {
   if (!panel) { return; }
   if (text === lastPlaybackText) { return; }
 
   if (isAnalyzing) {
     pendingPlaybackText = text;
+    return;
+  }
+
+  const cacheKey = getPlaybackCacheKey(text);
+  const cached = playbackCache.get(cacheKey);
+  if (cached) {
+    lastPlaybackText = text;
+    postToPanel('playback', cached);
     return;
   }
 
@@ -310,6 +357,11 @@ async function sendFullPlayback(text: string) {
   postToPanel('loading', false);
   if (frames && frames.length > 0) {
     lastPlaybackText = text;
+    if (playbackCache.size >= MAX_CACHE_SIZE) {
+      const oldest = playbackCache.keys().next().value;
+      if (oldest !== undefined) { playbackCache.delete(oldest); }
+    }
+    playbackCache.set(cacheKey, frames);
     postToPanel('playback', frames);
   }
 
@@ -381,7 +433,7 @@ function onDocumentChange() {
     if (editor) {
       sendLiveTrace(editor.document.getText(), editor.selection.active.line + 1);
     }
-  }, 50);
+  }, 200);
   resetIdleTimer();
 }
 
@@ -392,7 +444,7 @@ function onCursorMove() {
     if (editor) {
       sendLiveTrace(editor.document.getText(), editor.selection.active.line + 1);
     }
-  }, 50);
+  }, 100);
   resetIdleTimer();
 }
 
