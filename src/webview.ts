@@ -557,6 +557,8 @@ class GhostNode {
     this.pingAlpha = 0;
     this.pingRadius = 0;
     this.wasPinged = false;
+    this.selectionLerp = 0;
+    this.focusLerp = 0;
   }
 
   moveTo(tx, ty) { this.targetX = tx; this.targetY = ty; }
@@ -582,6 +584,10 @@ class GhostNode {
     this.suggestionLerp = lerp(this.suggestionLerp, this.isSuggestion ? 1 : 0, this.isSuggestion ? 0.15 : 0.25);
     const heatTarget = constrain(this.accessCount / maxAccessCount, 0, 1);
     this.heatLerp = lerp(this.heatLerp, heatTarget, 0.15);
+    const isFocused = (this.id === highlightId && !playbackActive);
+    this.focusLerp = lerp(this.focusLerp, isFocused ? 1 : 0, 0.3);
+    const isSelected = selectionNodeIds.has(this.id);
+    this.selectionLerp = lerp(this.selectionLerp, isSelected ? 1 : 0, 0.25);
     if (this.pingAlpha > 0) {
       this.pingRadius += 2.5;
       this.pingAlpha = max(0, this.pingAlpha - 6);
@@ -681,6 +687,33 @@ class GhostNode {
     textSize(14);
     textFont('Consolas');
     text(this.val, this.x, this.y);
+
+    if (this.selectionLerp > 0.02) {
+      const sa = this.selectionLerp;
+      fill(40, 120, 255, 35 * sa);
+      stroke(60, 140, 255, 100 * sa);
+      strokeWeight(1.5);
+      ellipse(this.x, this.y, this.radius * 2 + 6);
+      noFill();
+      stroke(60, 160, 255, 50 * sa);
+      strokeWeight(4);
+      ellipse(this.x, this.y, this.radius * 2 + 14);
+    }
+
+    if (this.focusLerp > 0.02) {
+      const fl = this.focusLerp;
+      const ringSize = map(sin(this.glowPulse * 2.5), -1, 1, 0, 4);
+      noFill();
+      drawingContext.shadowBlur = 14 * fl;
+      drawingContext.shadowColor = 'rgba(255,215,0,0.6)';
+      stroke(255, 215, 0, 200 * fl);
+      strokeWeight(2.5);
+      ellipse(this.x, this.y, this.radius * 2 + 16 + ringSize);
+      stroke(255, 215, 0, 80 * fl);
+      strokeWeight(1);
+      ellipse(this.x, this.y, this.radius * 2 + 26 + ringSize);
+      drawingContext.shadowBlur = 0;
+    }
 
     if (this.pingAlpha > 1) {
       noFill();
@@ -788,6 +821,10 @@ let maxAccessCount = 1;
 let complexity = '';
 let activePathPulse = 0;
 let scalarVariables = [];
+
+let cursorActiveLine = 0;
+let selectionNodeIds = new Set();
+let focusRingPulse = 0;
 
 let playbackFrames = [];
 let playbackIndex = 0;
@@ -1286,6 +1323,10 @@ function drawEdges() {
       stroke(0, 150, 150, 80); strokeWeight(1.2);
       line(sx, sy, ex, ey);
       drawArrowHead(ex, ey, angle, false, false, false, false);
+    } else if (e._selectionHighlight) {
+      stroke(60, 140, 255, 180); strokeWeight(2.2);
+      line(sx, sy, ex, ey);
+      drawArrowHead(ex, ey, angle, false, false, false, false);
     } else {
       stroke(0, 200, 200, 160); strokeWeight(1.5);
       line(sx, sy, ex, ey);
@@ -1600,6 +1641,27 @@ window.addEventListener('message', (event) => {
   } else if (msg.command === 'clearHeat') {
     for (const id in nodeMap) { nodeMap[id].accessCount = 0; nodeMap[id].heatLerp = 0; }
     maxAccessCount = 1;
+  } else if (msg.command === 'cursorSync') {
+    const { activeLine, selectedText, selStartLine, selEndLine } = msg.data;
+    cursorActiveLine = activeLine;
+    selectionNodeIds = new Set();
+    if (selectedText && selectedText.length > 0) {
+      for (const id in nodeMap) {
+        const node = nodeMap[id];
+        if (selectedText.indexOf(node.val) !== -1) {
+          selectionNodeIds.add(id);
+        }
+      }
+      for (const e of edges) {
+        if (selectionNodeIds.has(e.from) && selectionNodeIds.has(e.to)) {
+          e._selectionHighlight = true;
+        } else {
+          e._selectionHighlight = false;
+        }
+      }
+    } else {
+      for (const e of edges) { e._selectionHighlight = false; }
+    }
   } else if (msg.command === 'loading') {
     loading = msg.data;
     if (!loading) loadingPulse = 0;

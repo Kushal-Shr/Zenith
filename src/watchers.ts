@@ -28,13 +28,25 @@ export function onDocumentChange(): void {
   resetIdleTimer();
 }
 
-export function onCursorMove(): void {
+export function onCursorMove(event: vscode.TextEditorSelectionChangeEvent): void {
+  const editor = event.textEditor;
+
+  const activeLine = editor.selection.active.line + 1;
+  const sel = editor.selection;
+  const selectedText = sel.isEmpty ? '' : editor.document.getText(sel);
+  const selStartLine = sel.isEmpty ? 0 : sel.start.line + 1;
+  const selEndLine = sel.isEmpty ? 0 : sel.end.line + 1;
+
+  postToPanel('cursorSync', {
+    activeLine,
+    selectedText,
+    selStartLine,
+    selEndLine,
+  });
+
   if (state.cursorDebounceTimer) { clearTimeout(state.cursorDebounceTimer); }
   state.cursorDebounceTimer = setTimeout(() => {
-    const editor = vscode.window.activeTextEditor;
-    if (editor) {
-      sendLiveTrace(editor.document.getText(), editor.selection.active.line + 1);
-    }
+    sendLiveTrace(editor.document.getText(), activeLine);
   }, CURSOR_DEBOUNCE_MS);
   resetIdleTimer();
 }

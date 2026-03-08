@@ -58,7 +58,7 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     disposable,
     vscode.workspace.onDidChangeTextDocument(onDocumentChange),
-    vscode.window.onDidChangeTextEditorSelection(onCursorMove),
+    vscode.window.onDidChangeTextEditorSelection(e => onCursorMove(e)),
     vscode.window.onDidChangeActiveTextEditor(editor => {
       if (editor) { state.lastActiveEditor = editor; }
     }),
