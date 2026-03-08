@@ -6,7 +6,7 @@ import { state, resetAnalysisState } from './stateStore';
 import { postToPanel } from './panelManager';
 import { applyFixToEditor } from './editorActions';
 import { generateRoadmap } from './roadmap';
-import { sendLiveTrace } from './traceController';
+import { sendLiveTrace, sendFullPlayback } from './traceController';
 import { onDocumentChange, onCursorMove, resetIdleTimer } from './watchers';
 
 export function activate(context: vscode.ExtensionContext) {
@@ -32,6 +32,12 @@ export function activate(context: vscode.ExtensionContext) {
         if (msg.command === 'applyFix' && msg.data) {
           const fixData = msg.data as { fix: string; startLine: number; endLine: number };
           applyFixToEditor(fixData.fix, fixData.startLine, fixData.endLine);
+        } else if (msg.command === 'requestPlayback') {
+          const ed = vscode.window.activeTextEditor ?? state.lastActiveEditor;
+          if (ed && !ed.document.isClosed) {
+            state.lastPlaybackText = '';
+            sendFullPlayback(ed.document.getText());
+          }
         } else if (msg.command === 'clearHeat') {
           postToPanel('clearHeat');
         } else if (msg.command === 'finishSession') {

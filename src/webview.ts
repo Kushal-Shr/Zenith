@@ -975,6 +975,10 @@ function mousePressed() {
       return;
     }
   }
+
+  if (!playbackActive && Object.keys(nodeMap).length > 0) {
+    vscodeApi.postMessage({ command: 'requestPlayback' });
+  }
 }
 
 // ─── Error & Suggestion Tooltips ─────────────────────────────
