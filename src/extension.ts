@@ -128,5 +128,6 @@ async function handleStartNextTopic(payload: { template: string; pseudocode: str
 export function deactivate() {
   if (state.docDebounceTimer) { clearTimeout(state.docDebounceTimer); }
   if (state.cursorDebounceTimer) { clearTimeout(state.cursorDebounceTimer); }
+  if (state.selectionDebounceTimer) { clearTimeout(state.selectionDebounceTimer); }
   if (state.idleTimer) { clearTimeout(state.idleTimer); }
 }

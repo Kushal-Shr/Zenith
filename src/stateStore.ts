@@ -12,6 +12,8 @@ export const state = {
   lastActiveEditor: undefined as vscode.TextEditor | undefined,
   pendingTrace: null as { text: string; line: number } | null,
   pendingPlaybackText: null as string | null,
+  selectionDebounceTimer: undefined as NodeJS.Timeout | undefined,
+  lastSelectionKey: '',
 };
 
 export function resetAnalysisState(): void {

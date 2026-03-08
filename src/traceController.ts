@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import { MAX_CACHE_SIZE } from './config';
 import { DSPayload } from './types';
-import { analyzeCode, analyzeFullPlayback } from './analyzer';
+import { analyzeCode, analyzeFullPlayback, analyzeSelection } from './analyzer';
 import { postToPanel } from './panelManager';
 import { state } from './stateStore';
 
@@ -79,5 +79,43 @@ export async function sendFullPlayback(text: string): Promise<void> {
     const next = state.pendingPlaybackText;
     state.pendingPlaybackText = null;
     sendFullPlayback(next);
+  }
+}
+
+export async function sendSelectionPlayback(
+  fullText: string,
+  selectedText: string,
+  startLine: number,
+  endLine: number
+): Promise<void> {
+  if (!state.panel) { return; }
+
+  const selKey = `${startLine}:${endLine}:${selectedText.length}`;
+  if (selKey === state.lastSelectionKey) { return; }
+
+  if (state.isAnalyzing) { return; }
+
+  const cacheKey = getPlaybackCacheKey(fullText + '::SEL::' + selectedText);
+  const cached = playbackCache.get(cacheKey);
+  if (cached) {
+    state.lastSelectionKey = selKey;
+    postToPanel('playback', cached);
+    return;
+  }
+
+  state.isAnalyzing = true;
+  postToPanel('loading', true);
+  const frames = await analyzeSelection(fullText, selectedText, startLine, endLine);
+  state.isAnalyzing = false;
+  postToPanel('loading', false);
+
+  if (frames && frames.length > 0) {
+    state.lastSelectionKey = selKey;
+    if (playbackCache.size >= MAX_CACHE_SIZE) {
+      const oldest = playbackCache.keys().next().value;
+      if (oldest !== undefined) { playbackCache.delete(oldest); }
+    }
+    playbackCache.set(cacheKey, frames);
+    postToPanel('playback', frames);
   }
 }

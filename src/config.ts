@@ -15,4 +15,6 @@ export const DELTA_CONTEXT_RADIUS = 50;
 export const DOC_DEBOUNCE_MS = 200;
 export const CURSOR_DEBOUNCE_MS = 100;
 export const IDLE_TIMEOUT_MS = 2000;
+export const SELECTION_DEBOUNCE_MS = 400;
+export const SELECTION_MIN_LINES = 2;
 export const MAX_CACHE_SIZE = 5;

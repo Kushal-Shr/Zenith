@@ -55,6 +55,23 @@ export async function analyzeCode(text: string, lineNumber: number): Promise<DSP
   }
 }
 
+export async function analyzeSelection(fullText: string, selectedText: string, startLine: number, endLine: number): Promise<DSPayload[] | null> {
+  if (!apiKey || apiKey === 'your_api_key_here') { return null; }
+  try {
+    const prompt = `The user has highlighted lines ${startLine}-${endLine} of their C++ code. Trace ONLY the highlighted block step-by-step, showing how the data structure changes as each line in the selection executes. Use the full code for context (to know the initial state of the data structure), but the frames should only cover the execution of the highlighted code.
+
+FULL CODE:\n\n${fullText}\n\nHIGHLIGHTED CODE (lines ${startLine}-${endLine}):\n\n${selectedText}`;
+    const result = await playbackModel.generateContent(prompt);
+    const parsed: PlaybackPayload = JSON.parse(result.response.text());
+    if (!Array.isArray(parsed.frames) || parsed.frames.length === 0) { return null; }
+    for (const f of parsed.frames) { sanitizePayload(f); }
+    return parsed.frames;
+  } catch (err: unknown) {
+    console.error('[Zenith] Selection trace error:', err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
 export async function analyzeFullPlayback(text: string): Promise<DSPayload[] | null> {
   if (!apiKey || apiKey === 'your_api_key_here') { return null; }
   try {
